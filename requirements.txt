@@ -1,0 +1,14 @@
+# Core dependencies
+pandas
+numpy
+scikit-learn
+
+# Optional: for plotting and analysis
+matplotlib
+seaborn
+
+# Optional: for API/data fetching
+requests
+
+# Optional: for environment management
+python-dotenv

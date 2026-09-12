@@ -1,0 +1,70 @@
+2026-09-02 05:58:10,488 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:01:45,215 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:05:44,181 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:10:10,031 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:13:17,162 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:17:26,517 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:20:26,336 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:23:28,238 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:26:27,639 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.
+2026-09-02 06:34:43,386 | ERROR | Angel One connect failed for NIFTY
+Traceback (most recent call last):
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 143, in connect
+    self._ensure_session()
+  File "/workspaces/Force--lead--trading-system-/force-lead-trading-system/data/live_feed.py", line 130, in _ensure_session
+    raise RuntimeError("smartapi-python is not installed.")
+RuntimeError: smartapi-python is not installed.

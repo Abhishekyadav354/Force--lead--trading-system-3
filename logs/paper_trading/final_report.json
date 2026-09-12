@@ -1,0 +1,13 @@
+{
+  "total_trades": 3,
+  "wins": 3,
+  "losses": 0,
+  "win_rate": 100.0,
+  "profit_factor": "inf",
+  "reward_risk_ratio": "inf",
+  "total_return": 1.8,
+  "final_capital": 10180.0,
+  "starting_capital": 10000,
+  "generated_at": "2026-09-08T04:27:34.128188",
+  "note": "Paper trading results are historical simulation only and do not guarantee future performance."
+}

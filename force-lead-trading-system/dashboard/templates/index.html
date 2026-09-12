@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Force Lead Dashboard</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg: #0b0f14;
+            --panel: #121922;
+            --panel-2: #18212d;
+            --muted: #94a3b8;
+            --text: #edf2f7;
+            --buy: #22c55e;
+            --sell: #ef4444;
+            --wait: #facc15;
+            --accent: #60a5fa;
+            --danger: #f87171;
+            --good: #4ade80;
+            --warn: #fbbf24;
+            --line: rgba(148, 163, 184, 0.18);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .container {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 14px;
+        }
+
+        .panel {
+            background: linear-gradient(180deg, var(--panel), var(--panel-2));
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+        }
+
+        .span-12 { grid-column: span 12; }
+        .span-7 { grid-column: span 7; }
+        .span-5 { grid-column: span 5; }
+        .span-4 { grid-column: span 4; }
+        .span-8 { grid-column: span 8; }
+        .span-3 { grid-column: span 3; }
+
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .signal-box {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 110px;
+            font-size: clamp(2rem, 5vw, 4rem);
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04);
+            text-transform: uppercase;
+        }
+
+        .signal-box.buy { background: rgba(34,197,94,0.18); border: 1px solid rgba(34,197,94,0.55); color: var(--buy); }
+        .signal-box.sell { background: rgba(239,68,68,0.18); border: 1px solid rgba(239,68,68,0.55); color: var(--sell); }
+        .signal-box.wait { background: rgba(250,204,21,0.18); border: 1px solid rgba(250,204,21,0.55); color: var(--wait); }
+
+        .metric-label {
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 8px;
+        }
+
+        .gauge {
+            width: 100%;
+            background: rgba(148,163,184,0.15);
+            height: 16px;
+            border-radius: 999px;
+            position: relative;
+            overflow: hidden;
+            margin: 10px 0 8px;
+        }
+
+        .gauge-fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 50%;
+            background: linear-gradient(90deg, #ef4444, #facc15, #22c55e);
+            border-radius: inherit;
+        }
+
+        .needle {
+            position: absolute;
+            top: -3px;
+            width: 6px;
+            height: 22px;
+            background: white;
+            border-radius: 4px;
+            left: 50%;
+            transform: translateX(-50%);
+            box-shadow: 0 0 12px rgba(255,255,255,0.5);
+        }
+
+        .progress {
+            height: 12px;
+            border-radius: 999px;
+            background: rgba(148,163,184,0.12);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress > span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, #7dd3fc, #22c55e, #10b981);
+            width: 40%;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+
+        th, td {
+            padding: 8px 6px;
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+        }
+
+        .bar {
+            display: inline-block;
+            height: 8px;
+            border-radius: 999px;
+            background: rgba(34,197,94,0.6);
+            vertical-align: middle;
+            min-width: 12px;
+        }
+
+        .status-pill {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            background: rgba(34,197,94,0.16);
+            color: var(--good);
+        }
+
+        .status-pill.warn {
+            background: rgba(250,204,21,0.12);
+            color: var(--warn);
+        }
+
+        .alerts {
+            max-height: 210px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding-right: 4px;
+        }
+
+        .alert-item {
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(148,163,184,0.06);
+            border-left: 3px solid var(--accent);
+            font-size: 13px;
+        }
+
+        .row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .market-depth {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            margin-top: 8px;
+        }
+
+        .depth-col {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .depth-row {
+            display: grid;
+            grid-template-columns: 80px 1fr 80px;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+
+        .depth-bar {
+            height: 12px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.04);
+            overflow: hidden;
+        }
+
+        .depth-bar > span {
+            display: block;
+            height: 100%;
+        }
+
+        .depth-buy > span { background: linear-gradient(90deg, #22c55e, #4ade80); }
+        .depth-sell > span { background: linear-gradient(90deg, #f87171, #ef4444); }
+
+        @media (max-width: 900px) {
+            .span-7, .span-5, .span-4, .span-8, .span-3 {
+                grid-column: span 12;
+            }
+            .container { padding: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="grid">
+            <div class="panel span-12">
+                <div class="header-row">
+                    <div>
+                        <div class="metric-label">Trading System</div>
+                        <strong>Force-Lead Dashboard</strong>
+                    </div>
+                    <div id="socket-status" class="status-pill">LIVE</div>
+                </div>
+            </div>
+
+            <div class="panel span-7">
+                <div class="metric-label">Main Signal</div>
+                <div id="main-signal" class="signal-box wait">WAIT</div>
+            </div>
+
+            <div class="panel span-5">
+                <div class="metric-label">Force Score Gauge</div>
+                <div class="gauge">
+                    <div class="gauge-fill" style="width: 50%"></div>
+                    <div class="needle" id="force-needle" style="left: 50%"></div>
+                </div>
+                <div id="force-score-value" style="font-weight:700; margin-top:8px;">Force Score: +0.00</div>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">Lead Time Status</div>
+                <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+                    <strong id="lead-label">EARLY</strong>
+                    <span id="lead-progress-text">0% complete</span>
+                </div>
+                <div class="progress"><span id="lead-progress-fill" style="width:0%"></span></div>
+                <div style="margin-top:8px; color:var(--muted); font-size:13px;" id="lead-remaining">3.2 minutes remaining</div>
+            </div>
+
+            <div class="panel span-8">
+                <div class="metric-label">Factor Breakdown</div>
+                <table>
+                    <tbody id="factor-table">
+                        <tr><td>F1 Volume</td><td><span class="bar" style="width:70%"></span></td><td>+0.80</td></tr>
+                        <tr><td>F2 Wall</td><td><span class="bar" style="width:60%"></span></td><td>+0.60</td></tr>
+                        <tr><td>F3 Position</td><td><span class="bar" style="width:30%"></span></td><td>0.30</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">Probability</div>
+                <div class="row" style="justify-content: space-between; margin-bottom:6px;"><span>Win Probability</span><strong id="win-prob">68%</strong></div>
+                <div class="progress"><span id="win-prob-fill" style="width:68%"></span></div>
+                <div style="margin-top:10px; color:var(--muted);">Expected Value: <strong id="expected-value">+₹127</strong></div>
+                <div style="margin-top:4px; color:var(--muted);">Monte Carlo: <strong id="mc-value">71% (10k sims)</strong></div>
+                <div style="margin-top:4px; color:var(--muted);">Kelly Position: <strong id="kelly-position">2.3% of capital</strong></div>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">ML Prediction</div>
+                <div>Model Confidence: <strong id="ml-confidence">72%</strong></div>
+                <div style="margin-top:10px; font-size:13px; color:var(--muted);" id="ml-models">RF:74% | XGB:71% | GB:69% | LR:65%</div>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">Statistical Significance</div>
+                <div>p-value: <strong id="p-value">0.023</strong></div>
+                <div style="margin-top:8px;">Status: <span id="sig-status" class="status-pill">SIGNIFICANT</span></div>
+                <div style="margin-top:8px;">Z-score: <strong id="zscore">2.28</strong></div>
+                <div style="margin-top:8px;">Signal Streak: <strong id="streak">4 consecutive</strong></div>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">Live Candle Data</div>
+                <div>Symbol: <strong>ZEEL</strong> | Time: <strong>10:35-10:40</strong></div>
+                <div style="margin-top:8px;">Price: <strong>₹107.85</strong> | Change: <strong id="change-value">+2.3%</strong></div>
+                <div style="margin-top:8px;">Volume Speed: <strong>45,230/min (2.3x avg)</strong></div>
+                <div style="margin-top:8px;">Buyers: <strong>62%</strong> | Sellers: <strong>38%</strong></div>
+            </div>
+
+            <div class="panel span-5">
+                <div class="metric-label">Market Depth</div>
+                <div class="market-depth">
+                    <div class="depth-col">
+                        <div class="depth-row"><span>₹107.80</span><div class="depth-bar depth-buy"><span style="width:80%"></span></div><span>4,500</span></div>
+                        <div class="depth-row"><span>₹107.75</span><div class="depth-bar depth-buy"><span style="width:64%"></span></div><span>3,200</span></div>
+                        <div class="depth-row"><span>₹107.70</span><div class="depth-bar depth-buy"><span style="width:42%"></span></div><span>2,100</span></div>
+                    </div>
+                    <div class="depth-col">
+                        <div class="depth-row"><span>₹107.90</span><div class="depth-bar depth-sell"><span style="width:35%"></span></div><span>1,800</span></div>
+                        <div class="depth-row"><span>₹107.95</span><div class="depth-bar depth-sell"><span style="width:18%"></span></div><span>950</span></div>
+                        <div class="depth-row"><span>₹108.00</span><div class="depth-bar depth-sell"><span style="width:100%"></span></div><span>12,500</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel span-3">
+                <div class="metric-label">Regime Detector</div>
+                <div>Market: <strong>TRENDING</strong></div>
+                <div style="margin-top:8px;">Hurst: <strong>0.63</strong></div>
+                <div style="margin-top:8px;">Volatility: <strong>NORMAL</strong></div>
+                <div style="margin-top:8px;">Strategy: <strong>Follow momentum</strong></div>
+            </div>
+
+            <div class="panel span-4">
+                <div class="metric-label">Position Sizer</div>
+                <div>Capital: <strong>₹10,000</strong></div>
+                <div style="margin-top:8px;">Recommended size: <strong>₹230</strong> (2.3%)</div>
+                <div style="margin-top:8px;">Shares: <strong>2</strong></div>
+                <div style="margin-top:8px;">Stop Loss: <strong>₹106.77</strong></div>
+                <div style="margin-top:8px;">Target: <strong>₹109.50</strong></div>
+                <div style="margin-top:8px;">Risk: <strong>₹21.60</strong> | Reward: <strong>₹43.20</strong></div>
+            </div>
+
+            <div class="panel span-12">
+                <div class="metric-label">Alerts</div>
+                <div class="alerts" id="alerts-box">
+                    <div class="alert-item">[10:35] Bullish breakout confirmed by volume and force score.</div>
+                    <div class="alert-item">[10:36] Lead time approaching crossover; prepare to scale in.</div>
+                    <div class="alert-item">[10:37] Market depth shows buying interest around 107.80.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const signalBox = document.getElementById('main-signal');
+        const socketStatus = document.getElementById('socket-status');
+        const forceNeedle = document.getElementById('force-needle');
+        const forceScoreValue = document.getElementById('force-score-value');
+        const leadProgressFill = document.getElementById('lead-progress-fill');
+        const leadLabel = document.getElementById('lead-label');
+        const leadRemaining = document.getElementById('lead-remaining');
+        const factorTable = document.getElementById('factor-table');
+        const winProbFill = document.getElementById('win-prob-fill');
+        const winProbValue = document.getElementById('win-prob');
+        const alertsBox = document.getElementById('alerts-box');
+
+        socket.on('connect', () => {
+            socketStatus.textContent = 'LIVE';
+            socketStatus.style.color = '#4ade80';
+        });
+
+        socket.on('status', (data) => {
+            const item = document.createElement('div');
+            item.className = 'alert-item';
+            item.textContent = '[LIVE] ' + (data.msg || 'Connected to Trading System');
+            alertsBox.prepend(item);
+        });
+
+        function updateSignal(data) {
+            const signal = (data.signal || 'WAIT').toUpperCase();
+            signalBox.textContent = signal;
+            signalBox.className = 'signal-box ' + signal.toLowerCase();
+
+            const score = Number(data.force_score || 0.0);
+            const needlePos = Math.min(100, Math.max(0, ((score + 1) / 2) * 100));
+            forceNeedle.style.left = needlePos + '%';
+            forceScoreValue.textContent = 'Force Score: ' + (score >= 0 ? '+' : '') + score.toFixed(2);
+
+            const leadProgress = Math.min(100, Math.max(0, Number(data.lead_progress || 0.0) * 100));
+            leadProgressFill.style.width = leadProgress + '%';
+            const leadStates = ['EARLY', 'APPROACHING', 'NEAR_CROSSOVER', 'CROSSED'];
+            const index = Math.min(leadStates.length - 1, Math.floor(leadProgress / 33));
+            leadLabel.textContent = leadStates[index];
+            leadRemaining.textContent = (data.lead_remaining || '3.2 minutes remaining');
+
+            const factors = data.factors || [
+                ['F1 Volume', 0.80], ['F2 Wall', 0.60], ['F3 Position', 0.30], ['F4 Acceleration', 0.80],
+                ['F5 Institutional', 0.50], ['F6 OI Signal', 0.40], ['F7 Quality', 0.80], ['F8 Nifty Align', 1.50], ['F9 Candle', 0.80]
+            ];
+            factorTable.innerHTML = factors.map(([name, value]) => {
+                const width = Math.min(100, Math.max(10, Math.abs(Number(value)) * 55));
+                const val = Number(value);
+                const sign = val >= 0 ? '+' : '';
+                return `<tr><td>${name}</td><td><span class="bar" style="width:${width}%"></span></td><td>${sign}${val.toFixed(2)}</td></tr>`;
+            }).join('');
+
+            const winProb = Number(data.win_probability || 68);
+            winProbFill.style.width = winProb + '%';
+            winProbValue.textContent = winProb.toFixed(0) + '%';
+
+            const alert = document.createElement('div');
+            alert.className = 'alert-item';
+            alert.textContent = '[' + new Date().toLocaleTimeString() + '] Signal update: ' + signal + ' / Force ' + score.toFixed(2);
+            alertsBox.prepend(alert);
+
+            if (signal === 'BUY') {
+                const audio = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+                audio.play().catch(() => {});
+            } else if (signal === 'SELL') {
+                const audio = new Audio('data:audio/wav;base64,UklGRlZAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+                audio.play().catch(() => {});
+            }
+        }
+
+        socket.on('signal_update', updateSignal);
+
+        setInterval(() => {
+            const sample = {
+                signal: 'BUY',
+                force_score: 0.67,
+                lead_progress: 0.62,
+                lead_remaining: '1.8 minutes remaining',
+                factors: [
+                    ['F1 Volume', 0.82], ['F2 Wall', 0.61], ['F3 Position', 0.33], ['F4 Acceleration', 0.82],
+                    ['F5 Institutional', 0.51], ['F6 OI Signal', 0.44], ['F7 Quality', 0.80], ['F8 Nifty Align', 1.50], ['F9 Candle', 0.86]
+                ],
+                win_probability: 68
+            };
+            updateSignal(sample);
+        }, 5000);
+    </script>
+</body>
+</html>

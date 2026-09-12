@@ -1,0 +1,30 @@
+Create core/force_score.py with ForceScoreCalculator class.
+
+Add METHOD calculate_f1_volume_force that:
+- Takes current_candle and previous_candle
+- Calculates volume_ratio = current volume/min divided by previous volume/min
+- Calculates net_pressure = (buyers_pct - sellers_pct) / 100
+- Returns f1 = volume_ratio * net_pressure, normalized to -1 to +1 using tanh
+
+Add METHOD calculate_f2_wall_force that:
+- Takes current_candle with bid_total and ask_total
+- Returns (bid_total - ask_total) / (bid_total + ask_total)
+- Normalized to -1 to +1
+
+Add METHOD calculate_f3_position_risk that:
+- Takes current_price, day_high, day_low
+- Returns (current_price - day_low) / (day_high - day_low)
+- Range 0 to 1
+
+Add METHOD calculate_f4_acceleration that:
+- Takes list of last 5 candles
+- current_pct = (close - open) / open * 100
+- prev_pct = previous candle same calculation
+- Returns current_pct - prev_pct, normalized to -1 to +1
+
+Add METHOD calculate_total_force_score that:
+- Takes dict of all factors f1 to f9
+- Uses these weights: f1=0.25, f2=0.20, f4=0.20, f5=0.15, f6=0.10, f9=0.10
+- Subtracts f3 * 0.10 as risk deduction
+- Multiplies by f7 (quality) and f8 (nifty alignment)
+- Returns dict with score, signal (BUY/SELL/WAIT), strength
