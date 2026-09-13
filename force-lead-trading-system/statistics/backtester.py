@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, Sequence
+from datetime import datetime, timezone
+import math
+from typing import Any, Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
@@ -174,10 +175,219 @@ class Backtester:
         return {"by_hour": hour_summary, "by_score_range": score_summary}
 
     @staticmethod
+    def _timestamp(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _json_value(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, (np.integer, np.floating)):
+            value = value.item()
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {str(key): Backtester._json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Backtester._json_value(item) for item in value]
+        return str(value)
+
+    @staticmethod
+    def _identity(row: Dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(row.get("market", "UNKNOWN")).upper(),
+            str(row.get("symbol", "UNKNOWN")).upper(),
+            str(row.get("segment", "OTHER")).upper(),
+            str(row.get("timeframe", row.get("interval", "UNKNOWN"))).lower(),
+        )
+
+    @staticmethod
+    def _period(timestamp: Optional[datetime], row: Dict[str, Any]) -> str:
+        explicit = row.get("period", row.get("session_period"))
+        if explicit:
+            return str(explicit).upper()
+        if timestamp is None:
+            return "UNKNOWN"
+        if timestamp.hour < 11:
+            return "OPENING"
+        if timestamp.hour < 14:
+            return "MIDDAY"
+        return "CLOSING"
+
+    @staticmethod
+    def _regime(row: Dict[str, Any]) -> str:
+        return str(row.get("regime", row.get("market_regime", "UNKNOWN"))).upper()
+
+    @staticmethod
+    def _direction(value: Any) -> str:
+        text = str(value or "").upper()
+        if text in {"BUY", "BULL", "UP", "LONG", "POSITIVE"}:
+            return "UP"
+        if text in {"SELL", "BEAR", "DOWN", "SHORT", "NEGATIVE"}:
+            return "DOWN"
+        return "SIDEWAYS"
+
+    @classmethod
+    def _metric(cls, errors: list[float], actual: list[float], windows: list[Optional[float]]) -> Dict[str, Any]:
+        if not errors:
+            return {"samples": 0, "mae": None, "median_error": None, "p90_error": None, "mae_minutes": None, "median_error_minutes": None, "p90_error_minutes": None, "coverage": None}
+        ordered = sorted(errors)
+        percentile = lambda fraction: ordered[(len(ordered) - 1) * fraction] if False else ordered[int(round((len(ordered) - 1) * fraction))]
+        covered = [value <= window for value, window in zip(actual, windows) if window is not None]
+        mae = sum(errors) / len(errors)
+        median_error = percentile(0.5)
+        p90_error = percentile(0.9)
+        return {
+            "samples": len(errors),
+            "mae": mae, "mae_minutes": mae,
+            "median_error": median_error, "median_error_minutes": median_error,
+            "p90_error": p90_error, "p90_error_minutes": p90_error,
+            "coverage": sum(covered) / len(covered) if covered else None,
+        }
+
+    @classmethod
+    def _group_metrics(cls, observations: list[Dict[str, Any]]) -> Dict[str, Any]:
+        def metrics(items: list[Dict[str, Any]], error_key: str = "lead_error_minutes", actual_key: str = "actual_elapsed_minutes", window_key: str = "predicted_eta_minutes") -> Dict[str, Any]:
+            return cls._metric(
+                [item[error_key] for item in items if item.get(error_key) is not None],
+                [item[actual_key] for item in items if item.get(error_key) is not None],
+                [item.get(window_key) for item in items if item.get(error_key) is not None],
+            )
+
+        direction_samples = [item for item in observations if item.get("actual_direction")]
+        direction_accuracy = sum(item["predicted_direction"] == item["actual_direction"] for item in direction_samples) / len(direction_samples) if direction_samples else None
+        return {
+            "samples": len(observations),
+            "direction": {"samples": len(direction_samples), "accuracy": direction_accuracy},
+            "lead_time": metrics(observations),
+            "move_size": metrics(observations, "move_error", "actual_move_size", "predicted_move_size"),
+            "reversal": {"samples": sum(item.get("actual_reversal") is not None for item in observations), "accuracy": None},
+            "confidence_calibration": {"samples": len(observations), "mean_confidence": sum(item.get("confidence", 0.0) for item in observations) / len(observations) if observations else 0.0},
+        }
+
+    @classmethod
+    def walk_forward_validate(
+        cls,
+        historical_data: Iterable[Dict[str, Any]],
+        prediction_engine: Any = None,
+        *,
+        min_train_samples: int = 20,
+        rolling_window: Optional[int] = None,
+        step: int = 1,
+        direction_threshold: float = 0.0,
+        transaction_cost_bps: float = 0.0,
+        slippage_bps: float = 0.0,
+        data_source: str = "historical",
+    ) -> Dict[str, Any]:
+        """Validate predictions chronologically using only each group's prior rows.
+
+        This is a PAPER/SIMULATION measurement path. It never submits orders and
+        does not turn transaction-cost assumptions into a profitability claim.
+        """
+        if min_train_samples < 1 or step < 1 or rolling_window is not None and rolling_window < min_train_samples:
+            raise ValueError("Invalid walk-forward window parameters")
+        if transaction_cost_bps < 0 or slippage_bps < 0:
+            raise ValueError("Transaction costs and slippage cannot be negative")
+        if hasattr(historical_data, "to_dict"):
+            historical_data = historical_data.to_dict(orient="records")
+        rows = [dict(row) for row in historical_data if isinstance(row, dict)]
+        rows.sort(key=lambda row: cls._timestamp(row.get("timestamp", row.get("datetime", row.get("time")))) or datetime.min.replace(tzinfo=timezone.utc))
+        grouped: Dict[tuple[str, str, str, str], list[Dict[str, Any]]] = {}
+        invalid_timestamps = 0
+        for row in rows:
+            if cls._timestamp(row.get("timestamp", row.get("datetime", row.get("time")))) is None:
+                invalid_timestamps += 1
+                continue
+            grouped.setdefault(cls._identity(row), []).append(row)
+        if prediction_engine is None:
+            from core.prediction_engine import PredictionEngine
+            prediction_engine = PredictionEngine()
+
+        observations: list[Dict[str, Any]] = []
+        leakage_checks = {"chronological": True, "future_rows_used_for_prediction": 0, "predictions": 0}
+        for identity, group in sorted(grouped.items()):
+            for index in range(min_train_samples, len(group), step):
+                prior = group[:index]
+                train = prior[-rolling_window:] if rolling_window else prior
+                evaluation = group[index]
+                live = dict(train[-1]) if train else {}
+                prediction_timestamp = cls._timestamp(evaluation.get("timestamp"))
+                result = prediction_engine.predict(
+                    live, train, market=identity[0], segment=identity[2], timeframe=identity[3]
+                )
+                leakage_checks["predictions"] += 1
+                predicted_direction = cls._direction(result.get("direction", result.get("signal")))
+                previous_close = cls._safe_float(prior[-1].get("close"), 0.0)
+                evaluation_close = cls._safe_float(evaluation.get("close"), previous_close)
+                move = evaluation_close - previous_close
+                actual_direction = "UP" if move > direction_threshold else "DOWN" if move < -direction_threshold else "SIDEWAYS"
+                adaptive = result.get("adaptive_lead_time", {}) if isinstance(result, dict) else {}
+                eta = adaptive.get("normal_eta_minutes")
+                completion = next((row for row in group[index + 1:] if row.get("event_id") == evaluation.get("event_id") and (row.get("completed") is True or row.get("remaining_gap") in (0, 0.0))), None) if evaluation.get("event_id") else None
+                actual_elapsed = None
+                if completion is not None and prediction_timestamp is not None:
+                    completed_at = cls._timestamp(completion.get("timestamp"))
+                    if completed_at and completed_at > prediction_timestamp:
+                        actual_elapsed = (completed_at - prediction_timestamp).total_seconds() / 60.0
+                predicted_move = result.get("predicted_move_size", result.get("move", {}).get("predicted_size") if isinstance(result.get("move"), dict) else None)
+                actual_reversal = evaluation.get("actual_reversal")
+                observations.append({
+                    "market": identity[0], "symbol": identity[1], "segment": identity[2], "timeframe": identity[3],
+                    "timestamp": cls._json_value(evaluation.get("timestamp")), "period": cls._period(prediction_timestamp, evaluation), "regime": cls._regime(evaluation),
+                    "predicted_direction": predicted_direction, "actual_direction": actual_direction,
+                    "predicted_move_size": cls._safe_float(predicted_move) if predicted_move is not None else None, "actual_move_size": abs(move),
+                    "move_error": abs(cls._safe_float(predicted_move) - abs(move)) if predicted_move is not None else None,
+                    "predicted_eta_minutes": cls._safe_float(eta) if eta is not None else None, "actual_elapsed_minutes": actual_elapsed,
+                    "lead_error_minutes": abs(cls._safe_float(eta) - actual_elapsed) if eta is not None and actual_elapsed is not None else None,
+                    "confidence": max(0.0, min(1.0, cls._safe_float(result.get("confidence"), 0.0))),
+                    "speed_state": str(adaptive.get("speed_regime", "NORMAL")), "actual_reversal": actual_reversal,
+                })
+        reports: Dict[str, Any] = {}
+        for observation in observations:
+            key = "/".join(observation[field] for field in ("market", "symbol", "segment", "timeframe"))
+            reports.setdefault(key, []).append(observation)
+        formatted = {}
+        for key, items in reports.items():
+            formatted[key] = {"overall": cls._group_metrics(items), "by_timeframe": {}, "by_period": {}, "by_regime": {}, "by_speed_state": {}}
+            for field, output in (("timeframe", "by_timeframe"), ("period", "by_period"), ("regime", "by_regime"), ("speed_state", "by_speed_state")):
+                for value in sorted({item[field] for item in items}):
+                    formatted[key][output][value] = cls._group_metrics([item for item in items if item[field] == value])
+            formatted[key]["events"] = items
+            formatted[key]["quality"] = {
+                "sample_count": len(items),
+                "sufficient_samples": len(items) >= min_train_samples,
+                "confidence": min(1.0, len(items) / max(min_train_samples, 1)),
+                "insufficient_samples": len(items) < min_train_samples,
+            }
+        result = {"historical_only": True, "paper_simulation_only": True, "data_source": str(data_source), "synthetic_data": str(data_source).lower() == "synthetic", "rolling_window": rolling_window, "expanding_window": rolling_window is None, "minimum_train_samples": min_train_samples, "transaction_cost_bps": float(transaction_cost_bps), "slippage_bps": float(slippage_bps), "invalid_timestamp_rows": invalid_timestamps, "reports": formatted, "samples": len(observations), "leakage_checks": leakage_checks, "note": "Synthetic results are code-validation only; no profitability claim is made." if str(data_source).lower() == "synthetic" else "Walk-forward validation uses only prior rows for each prediction."}
+        return cls._json_value(result)
+
+    validate_walk_forward = walk_forward_validate
+    run_walk_forward = walk_forward_validate
+
+    @staticmethod
     def run_full_backtest(historical_data, weights, capital=10000):
         """
         Run a historical validation loop over the dataset and summarize cumulative performance.
         """
+        if any(
+            isinstance(candle, dict)
+            and str(candle.get("data_source", "")).lower() == "synthetic"
+            for candle in historical_data
+        ):
+            print("WARNING: Synthetic data results may not reflect real performance")
+
         trades = []
         equity_curve = [capital]
         current_capital = float(capital)

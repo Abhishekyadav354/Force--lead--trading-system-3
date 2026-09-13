@@ -1,17 +1,31 @@
 import json
-import os
+import math
 import time
 from pathlib import Path
 
 import joblib
-from dotenv import load_dotenv
 
+from config.settings import settings
 from data.historical import HistoricalData
 from data.live_feed import LiveDataFeed
 from ml.model_trainer import ModelTrainer
 from statistics.optimizer import SystemOptimizer
 
-load_dotenv()
+DEFAULT_WEIGHTS = [0.25, 0.20, 0.10, 0.20, 0.10, 0.05, 0.05, 0.03, 0.02]
+
+
+def _valid_weights(value):
+    if isinstance(value, list):
+        return bool(value) and all(
+            isinstance(item, (int, float)) and math.isfinite(float(item))
+            for item in value
+        )
+    if isinstance(value, dict):
+        return bool(value) and all(
+            isinstance(item, (int, float)) and math.isfinite(float(item))
+            for item in value.values()
+        )
+    return False
 
 
 print(
@@ -27,16 +41,11 @@ print(
 
 def initialize_system():
     """Initialize all system components and return: feed, system, historical_candles, nifty_candles."""
-    api_key = os.getenv("ANGEL_API_KEY")
-    client_id = os.getenv("ANGEL_CLIENT_ID")
-    password = os.getenv("ANGEL_PASSWORD")
-    totp_secret = os.getenv("ANGEL_TOTP_SECRET")
-
     feed = LiveDataFeed(
-        api_key=api_key,
-        client_id=client_id,
-        password=password,
-        totp_secret=totp_secret,
+        api_key=settings.angel_api_key,
+        client_id=settings.angel_client_id,
+        password=settings.angel_password,
+        totp_secret=settings.angel_totp_secret,
     )
 
     try:
@@ -53,8 +62,8 @@ def initialize_system():
 
     print("API connection successful: Angel One live feed connected.")
 
-    stock_symbol = os.getenv("STOCK_SYMBOL", "NIFTY")
-    timeframe = int(os.getenv("TIMEFRAME", "5"))
+    stock_symbol = settings.stock_symbol
+    timeframe = settings.timeframe
 
     if not hasattr(feed, "api"):
         feed.api = getattr(feed, "api_client", None)
@@ -100,13 +109,17 @@ def initialize_system():
 
     optimizer = SystemOptimizer()
     weights_path = base_dir / "config" / "optimal_weights.json"
+    optimal_weights = DEFAULT_WEIGHTS.copy()
     try:
         if weights_path.exists():
             with open(weights_path, "r", encoding="utf-8") as f:
-                optimal_weights = json.load(f)
+                loaded_weights = json.load(f)
+            if not _valid_weights(loaded_weights):
+                raise ValueError("optimal weights must contain finite numeric values")
+            optimal_weights = loaded_weights
             print("Saved weights were loaded.")
-    except Exception:
-        optimal_weights = {}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Invalid optimal weights; using defaults: {exc}")
 
     if not weights_path.exists():
         print("Running optimization (takes ~30 seconds)...")
@@ -127,14 +140,14 @@ def initialize_system():
 
     from core.combined_system import CompleteTradingSystem
 
-    capital = float(os.getenv("CAPITAL", 10000))
+    capital = settings.capital
     system = CompleteTradingSystem(
         capital=capital,
         optimal_weights=optimal_weights,
         trained_models=models if "models" in locals() else None,
     )
 
-    trading_mode = str(os.getenv("TRADING_MODE", "paper")).upper()
+    trading_mode = settings.trading_mode.upper()
     print(f"Symbol: {stock_symbol}")
     print(f"Capital: {capital}")
     print(f"Trading mode: {trading_mode}")

@@ -5,8 +5,9 @@ import logging
 import os
 import time
 import traceback
+import urllib.request
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event, Lock
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -19,9 +20,14 @@ try:
     from smartapi import SmartConnect
     from smartapi.smartWebSocketV2 import SmartWebSocketV2
 except Exception:  # pragma: no cover - optional dependency handling
-    pyotp = None
-    SmartConnect = None
-    SmartWebSocketV2 = None
+    try:
+        import pyotp
+        from SmartApi import SmartConnect
+        from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+    except Exception:  # pragma: no cover - optional dependency handling
+        pyotp = None
+        SmartConnect = None
+        SmartWebSocketV2 = None
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -54,14 +60,17 @@ class AngelLiveFeed:
         password: Optional[str] = None,
         totp_secret: Optional[str] = None,
         symbol: Optional[str] = None,
+        exchange: Optional[str] = None,
     ):
         self.api_key = api_key or settings.angel_api_key
         self.client_id = client_id or settings.angel_client_id
         self.password = password or settings.angel_password
         self.totp_secret = totp_secret or settings.angel_totp_secret
         self.symbol = symbol or settings.stock_symbol
+        self.exchange = (exchange or "NSE").strip().upper()
 
         self.api_client = None
+        self.instrument: Optional[Dict[str, str]] = None
         self.ws = None
         self.connected = False
         self.lock = Lock()
@@ -69,6 +78,10 @@ class AngelLiveFeed:
         self.last_disconnect_alert = None
         self.reconnect_attempts = 0
         self.stop_event = Event()
+        self._completed_candle: Optional[Dict[str, Any]] = None
+        self._completed_candle_pending = False
+        self.max_quote_age_seconds = max(int(getattr(settings, "TIMEFRAME_MINUTES", 5)) * 60, 300)
+        configured_timeframe = f"{int(getattr(settings, 'TIMEFRAME_MINUTES', 5))}min"
 
         self.tick_history: deque = deque(maxlen=50)
         self.candles: Dict[str, deque] = {
@@ -76,6 +89,7 @@ class AngelLiveFeed:
             "5min": deque(maxlen=200),
             "10min": deque(maxlen=200),
         }
+        self.candles.setdefault(configured_timeframe, deque(maxlen=200))
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         try:
@@ -109,6 +123,34 @@ class AngelLiveFeed:
                 return self._utc_now()
         return self._utc_now()
 
+    def _parse_market_timestamp(self, value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            try:
+                parsed = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        elif isinstance(value, str):
+            parsed = None
+            for parser in (
+                lambda item: datetime.fromisoformat(item.replace("Z", "+00:00")),
+                lambda item: datetime.strptime(item, "%d-%b-%Y %H:%M:%S"),
+            ):
+                try:
+                    parsed = parser(value)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                return None
+        else:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     def _extract_levels(self, depth_data: Any) -> List[List[float]]:
         result: List[List[float]] = []
         try:
@@ -137,6 +179,107 @@ class AngelLiveFeed:
             self.api_client.generateSession(self.client_id, self.password, otp)
         return self.api_client
 
+    def _resolve_instrument(self) -> Dict[str, str]:
+        """Resolve the configured symbol without inventing a broker token."""
+        if self.instrument is not None:
+            return self.instrument
+
+        symbol = self.symbol.strip().upper()
+        client = self._ensure_session()
+        search = client.searchScrip(self.exchange, symbol)
+        matches = search.get("data") if isinstance(search, dict) else None
+        candidates = matches if isinstance(matches, list) else []
+        exact = [
+            item for item in candidates
+            if str(item.get("tradingsymbol", "")).upper() == symbol
+            and str(item.get("exchange", "")).upper() == self.exchange
+            and str(item.get("symboltoken", "")).strip()
+        ]
+
+        if not exact:
+            url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+            with urllib.request.urlopen(url, timeout=15) as response:
+                instruments = json.load(response)
+            exact = [
+                item for item in instruments
+                if str(item.get("exch_seg", "")).upper() == self.exchange
+                and str(item.get("symbol", "")).upper() == symbol
+                and str(item.get("token", "")).strip()
+            ]
+
+        if not exact:
+            raise LookupError("configured symbol was not found in Angel One instruments")
+
+        item = exact[0]
+        self.instrument = {
+            "exchange": str(item.get("exchange") or item.get("exch_seg") or self.exchange),
+            "tradingsymbol": str(item.get("tradingsymbol") or item.get("symbol")),
+            "symboltoken": str(item.get("symboltoken") or item.get("token")),
+            "instrumenttype": str(item.get("instrumenttype") or ""),
+            "series": str(item.get("series") or ""),
+        }
+        return self.instrument
+
+    def get_market_data(self) -> Dict[str, Any]:
+        """Fetch and validate one read-only FULL quote for the configured symbol."""
+        try:
+            client = self._ensure_session()
+            instrument = self._resolve_instrument()
+            response = client.getMarketData(
+                "FULL",
+                {instrument["exchange"]: [instrument["symboltoken"]]},
+            )
+            if not isinstance(response, dict) or response.get("status") is False:
+                return {
+                    "status": "failed",
+                    "error_category": "market_data_api_error",
+                    "instrument": instrument,
+                }
+
+            payload = response.get("data")
+            quote = payload
+            if isinstance(payload, dict):
+                quote = payload.get("fetched") or payload.get("fetchedData") or payload.get("snapQuoteData") or payload.get("data") or payload
+            if isinstance(quote, list):
+                quote = quote[0] if quote else None
+            if not isinstance(quote, dict):
+                return {"status": "failed", "error_category": "invalid_market_data_payload", "instrument": instrument}
+
+            price = quote.get("ltp", quote.get("lastTradedPrice"))
+            volume = quote.get("volume", quote.get("tradeVolume", quote.get("totalTradedVolume")))
+            timestamp = quote.get("fetchedAt", quote.get("exchFeedTime", quote.get("exchTradeTime", quote.get("timestamp", quote.get("lastTradedTime")))))
+            if price is None or volume is None or timestamp is None:
+                return {"status": "failed", "error_category": "missing_market_data_fields", "instrument": instrument}
+            price = float(price)
+            volume = float(volume)
+            parsed_timestamp = self._parse_market_timestamp(timestamp)
+            if price <= 0 or volume < 0 or parsed_timestamp is None:
+                return {"status": "failed", "error_category": "invalid_market_data_values", "instrument": instrument}
+            if parsed_timestamp > self._utc_now() + timedelta(minutes=1):
+                return {"status": "failed", "error_category": "future_market_data", "instrument": instrument}
+            if self._utc_now() - parsed_timestamp > timedelta(seconds=self.max_quote_age_seconds):
+                return {"status": "failed", "error_category": "stale_market_data", "instrument": instrument}
+
+            return {
+                "status": "ok",
+                "error_category": None,
+                "instrument": instrument,
+                "price": price,
+                "volume": volume,
+                "timestamp": str(timestamp),
+                "timestamp_datetime": parsed_timestamp,
+                "open": self._safe_float(quote.get("open"), price),
+                "high": self._safe_float(quote.get("high"), price),
+                "low": self._safe_float(quote.get("low"), price),
+                "close": self._safe_float(quote.get("close"), price),
+            }
+        except LookupError:
+            return {"status": "failed", "error_category": "instrument_lookup_failed"}
+        except (TypeError, ValueError):
+            return {"status": "failed", "error_category": "invalid_market_data_values"}
+        except Exception:
+            return {"status": "failed", "error_category": "market_data_request_failed"}
+
     def connect(self) -> Dict[str, Any]:
         """Create a SmartAPI session and initialize the websocket client."""
         try:
@@ -145,7 +288,12 @@ class AngelLiveFeed:
                 try:
                     self.ws = SmartWebSocketV2(self.api_client.token, self.api_key, self.client_id)
                 except TypeError:
-                    self.ws = SmartWebSocketV2(self.api_key, self.client_id)
+                    try:
+                        self.ws = SmartWebSocketV2(self.api_key, self.client_id)
+                    except Exception:
+                        self.ws = None
+                except Exception:
+                    self.ws = None
             self.connected = True
             self.reconnect_attempts = 0
             return {"status": "connected", "symbol": self.symbol, "client_id": self.client_id}
@@ -251,11 +399,17 @@ class AngelLiveFeed:
         if timeframe == "10min":
             minute = (ts.minute // 10) * 10
             return ts.replace(minute=minute, second=0, microsecond=0)
+        if timeframe.endswith("min"):
+            minutes = max(int(timeframe[:-3]), 1)
+            minute = (ts.minute // minutes) * minutes
+            return ts.replace(minute=minute, second=0, microsecond=0)
         return ts.replace(second=0, microsecond=0)
 
     def _update_candles(self, tick: Dict[str, Any]) -> None:
         timestamp = tick["timestamp"]
-        for timeframe in ("1min", "5min", "10min"):
+        configured_timeframe = f"{int(getattr(settings, 'TIMEFRAME_MINUTES', 5))}min"
+        timeframes = list(dict.fromkeys(("1min", "5min", "10min", configured_timeframe)))
+        for timeframe in timeframes:
             bucket = self._bucket_timestamp(timestamp, timeframe)
             candle = None
             for existing in self.candles[timeframe]:
@@ -263,6 +417,9 @@ class AngelLiveFeed:
                     candle = existing
                     break
             if candle is None:
+                if timeframe == "5min" and self.candles[timeframe]:
+                    self._completed_candle = dict(self.candles[timeframe][-1])
+                    self._completed_candle_pending = True
                 candle = {
                     "symbol": self.symbol,
                     "timestamp": bucket,
@@ -330,6 +487,62 @@ class AngelLiveFeed:
         except Exception as exc:
             log_error("Error while processing live tick", exc)
             return {"status": "error", "symbol": self.symbol, "message": str(exc)}
+
+    def get_live_candle(self) -> Optional[Dict[str, Any]]:
+        """Fetch one valid quote and return the current configured-timeframe candle."""
+        data = self.get_market_data()
+        if data.get("status") != "ok":
+            self.connected = False if data.get("error_category") in {"market_data_request_failed", "market_data_api_error"} else self.connected
+            return None
+
+        tick = self.process_tick({
+            "timestamp": data["timestamp_datetime"],
+            "ltp": data["price"],
+            "volume": data["volume"],
+            "open": data["open"],
+            "high": data["high"],
+            "low": data["low"],
+            "close": data["close"],
+        })
+        if tick.get("status") == "error":
+            return None
+        timeframe = f"{int(getattr(settings, 'TIMEFRAME_MINUTES', 5))}min"
+        candles = self.get_candles(timeframe, limit=1)
+        return candles[-1] if candles else None
+
+    def get_nifty_candle(self) -> Optional[Dict[str, Any]]:
+        """Return the live index candle when the configured symbol is NIFTY."""
+        if self.symbol.strip().upper() != "NIFTY":
+            return None
+        timeframe = f"{int(getattr(settings, 'TIMEFRAME_MINUTES', 5))}min"
+        candles = self.get_candles(timeframe, limit=1)
+        return candles[-1] if candles else None
+
+    def get_options_data(self) -> Dict[str, Any]:
+        """Keep the existing prediction contract neutral for index quote data."""
+        return {}
+
+    def get_order_flow(self) -> List[Dict[str, Any]]:
+        """Expose recent validated ticks to the existing OrderFlowAnalyzer."""
+        return [
+            {
+                "price": tick.get("ltp", 0.0),
+                "volume": tick.get("volume", 0.0),
+                "timestamp": tick.get("timestamp"),
+                "bid": tick.get("bid_levels", [[None]])[0][0] if tick.get("bid_levels") else None,
+                "ask": tick.get("ask_levels", [[None]])[0][0] if tick.get("ask_levels") else None,
+            }
+            for tick in self.get_recent_ticks()
+        ]
+
+    def is_candle_complete(self) -> bool:
+        return self._completed_candle_pending
+
+    def get_completed_candle(self) -> Optional[Dict[str, Any]]:
+        if not self._completed_candle_pending:
+            return None
+        self._completed_candle_pending = False
+        return dict(self._completed_candle) if self._completed_candle else None
 
     def get_recent_ticks(self, limit: int = 50) -> List[Dict[str, Any]]:
         return list(self.tick_history)[-limit:]

@@ -91,9 +91,27 @@ def _daily_limit_reached(trades_today, logger):
     return False
 
 
-def _get_live_market_data(feed):
+def _daily_loss_limit_reached(daily_pnl, logger, broadcast_fn):
+    capital = float(getattr(settings, "CAPITAL", 0.0) or 0.0)
+    loss_limit = capital * float(getattr(settings, "MAX_DAILY_LOSS_PCT", 0.05))
+    if daily_pnl < -loss_limit:
+        message = f"Daily loss limit reached: {daily_pnl:.2f}"
+        logger.log_error(message)
+        broadcast_fn({
+            "signal": "WAIT",
+            "alerts": [{"level": "HIGH", "message": message}],
+            "error": "Trading stopped for the day.",
+        })
+        return True
+
+    return False
+
+
+def _get_live_market_data(feed, nifty_candles=None):
     live_candle = feed.get_live_candle()
     nifty_candle = feed.get_nifty_candle()
+    if nifty_candle is None and nifty_candles:
+        nifty_candle = nifty_candles[-1]
     options_data = feed.get_options_data()
     order_flow = feed.get_order_flow()
 
@@ -141,6 +159,8 @@ def _add_price_info(result, live_candle):
     result["price"] = close_price
     result["change"] = change
     result["changePct"] = (change / open_price * 100) if open_price else 0.0
+    result["timestamp"] = candle.get("timestamp")
+    result["volume"] = float(candle.get("volume", 0.0) or 0.0)
     result["symbol"] = os.getenv("STOCK_SYMBOL", "NIFTY")
 
     return result
@@ -164,7 +184,9 @@ def _print_market_status(result, live_candle):
 
 def _update_historical_candles(feed, live_candle, historical_candles):
     if feed.is_candle_complete() is True:
-        historical_candles.append(live_candle)
+        completed_candle = feed.get_completed_candle() or live_candle
+        if completed_candle:
+            historical_candles.append(completed_candle)
         historical_candles = historical_candles[-200:]
         print(f"Historical candle count: {len(historical_candles)}")
 
@@ -175,11 +197,21 @@ def run_main_loop(feed, system, historical_candles, nifty_candles, broadcast_fn,
     prev_result = None
     trades_today = 0
     daily_pnl = 0.0
+    retry_delay = 5
 
     print("Main loop started. Watching market...")
 
     while True:
         try:
+            get_todays_stats = getattr(logger, "get_todays_stats", None)
+            if callable(get_todays_stats):
+                stats = get_todays_stats()
+                trades_today = stats.get("trades_today", trades_today)
+                daily_pnl = stats.get("daily_pnl", daily_pnl)
+
+            if _daily_loss_limit_reached(daily_pnl, logger, broadcast_fn):
+                break
+
             if not is_trading_time():
                 time.sleep(30)
                 continue
@@ -188,10 +220,13 @@ def run_main_loop(feed, system, historical_candles, nifty_candles, broadcast_fn,
                 time.sleep(60)
                 continue
 
-            live_candle, nifty_candle, options_data, order_flow = _get_live_market_data(feed)
+            live_candle, nifty_candle, options_data, order_flow = _get_live_market_data(feed, nifty_candles)
             if not live_candle:
-                time.sleep(5)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
                 continue
+
+            retry_delay = 5
 
             result = _analyze_market(
                 system,
@@ -229,4 +264,5 @@ def run_main_loop(feed, system, historical_candles, nifty_candles, broadcast_fn,
         except Exception as exc:
             logger.log_error(f"Main loop error: {str(exc)}")
             print(f"Main loop error: {str(exc)}")
-            time.sleep(10)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)

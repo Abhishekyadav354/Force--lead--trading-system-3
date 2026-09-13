@@ -63,6 +63,7 @@ class HistoricalDataManager:
         "volume_per_minute",
         "institutional_score",
         "spread_ratio",
+        "data_source",
     ]
 
     def __init__(self, symbol: Optional[str] = None, interval: str = "5minute", limit: int = 200):
@@ -112,6 +113,7 @@ class HistoricalDataManager:
             "volume_per_minute": [float(v / 5) for v in [1200 + (i * 30) for i in range(len(timestamps))]],
             "institutional_score": [1.0 + (i * 0.05) for i in range(len(timestamps))],
             "spread_ratio": [1.0 + (i * 0.02) for i in range(len(timestamps))],
+            "data_source": "synthetic",
         })
         return frame
 
@@ -142,7 +144,7 @@ class HistoricalDataManager:
                 data["timestamp"] = pd.to_datetime(data["timestamp"])
             for column in self.CANDLE_COLUMNS:
                 if column not in data.columns:
-                    data[column] = 0
+                    data[column] = "live" if column == "data_source" else 0
             self.df = data[self.CANDLE_COLUMNS].copy()
             self.last_refresh = datetime.now(timezone.utc)
             return self.df

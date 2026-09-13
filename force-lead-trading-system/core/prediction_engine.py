@@ -6,6 +6,7 @@ import inspect
 from typing import Any, Dict, List, Optional
 
 from config.settings import settings
+from core.adaptive_lead_time import AdaptiveLeadTimeCalculator
 from core.force_score import ForceScoreCalculator
 from core.lead_time import LeadTimeCalculator
 from core.order_flow import OrderFlowAnalyzer
@@ -53,6 +54,10 @@ class PredictionEngine:
         monte_carlo_engine: Optional[MonteCarloRiskEngine] = None,
         stochastic_model: Optional[StochasticPriceModel] = None,
         timeframe_minutes: Optional[float] = None,
+        adaptive_lead_calculator: Optional[AdaptiveLeadTimeCalculator] = None,
+        market: str = "UNKNOWN",
+        segment: str = "OTHER",
+        timeframe: Optional[str] = None,
     ) -> None:
         self.force_calculator = force_calculator or ForceScoreCalculator()
         self.order_flow_analyzer = order_flow_analyzer or OrderFlowAnalyzer()
@@ -61,6 +66,10 @@ class PredictionEngine:
         self.ml_predictor = ml_predictor or MLPredictor()
         self.monte_carlo_engine = monte_carlo_engine or MonteCarloRiskEngine()
         self.stochastic_model = stochastic_model or StochasticPriceModel()
+        self.adaptive_lead_calculator = adaptive_lead_calculator or AdaptiveLeadTimeCalculator()
+        self.market = market
+        self.segment = segment
+        self.timeframe = timeframe
         self.timeframe_minutes = (
             timeframe_minutes
             if timeframe_minutes is not None
@@ -437,6 +446,82 @@ class PredictionEngine:
             neutral_result["error"] = f"LeadTime calculation failed: {exc}"
             return neutral_result
 
+    def _calculate_adaptive_lead_time(
+        self,
+        live_data: Dict[str, Any],
+        historical_data: List[Dict[str, Any]],
+        market: Optional[str] = None,
+        segment: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Calculate the historical speed layer without changing legacy lead fields."""
+        neutral = {
+            "available": False,
+            "market": market or self.market,
+            "segment": segment or self.segment,
+            "timeframe": timeframe or self.timeframe or "5m",
+            "current_speed": 0.0,
+            "required_speed": 0.0,
+            "normal_eta_minutes": None,
+            "accelerated_eta_minutes": None,
+            "shock_eta_minutes": None,
+            "estimated_lead_window_bars": {"normal": None, "accelerated": None, "shock": None},
+            "historical_speed_percentiles": {"median": 0.0, "p75": 0.0, "p90": 0.0, "p95": 0.0, "maximum_reliable": 0.0},
+            "sample_count": 0,
+            "lookback_days": getattr(self.adaptive_lead_calculator, "lookback_days", 0),
+            "confidence": 0.0,
+            "speed_regime": "NORMAL",
+            "historical_estimate": True,
+            "model_note": "Historical/model estimate unavailable; insufficient data.",
+        }
+        try:
+            live = live_data if isinstance(live_data, dict) else {}
+            market_name = market or live.get("market") or self.market
+            segment_name = segment or live.get("segment") or self.segment
+            selected_timeframe = timeframe or live.get("timeframe") or self.timeframe
+            if selected_timeframe is None:
+                minutes = self._safe_float(self.timeframe_minutes, 5.0)
+                selected_timeframe = f"{int(minutes)}m" if minutes.is_integer() else f"{minutes:g}m"
+
+            gap = live.get("remaining_volume_gap", live.get("remaining_gap", live.get("volume_gap", live.get("progress_gap", 0.0))))
+            speed = live.get("current_speed", live.get("volume_speed", live.get("speed", live.get("volume_per_minute", 0.0))))
+            if not self._safe_float(speed, 0.0):
+                volume = self._safe_float(live.get("volume", live.get("progress_volume", 0.0)), 0.0)
+                timeframe_value = self._safe_float(self.timeframe_minutes, 5.0)
+                if str(selected_timeframe).lower().endswith("m"):
+                    timeframe_value = self._safe_float(str(selected_timeframe)[:-1], timeframe_value)
+                elif str(selected_timeframe).lower().endswith("h"):
+                    timeframe_value = self._safe_float(str(selected_timeframe)[:-1], timeframe_value / 60.0) * 60.0
+                speed = volume / max(timeframe_value, 1.0)
+            current_timestamp = live.get("timestamp", live.get("datetime", live.get("time")))
+            profile_history = [
+                {
+                    **row,
+                    "market": row.get("market", market_name),
+                    "segment": row.get("segment", segment_name),
+                    "timeframe": row.get("timeframe", selected_timeframe),
+                }
+                for row in historical_data
+                if isinstance(row, dict)
+            ]
+            result = self.adaptive_lead_calculator.estimate(
+                remaining_volume_gap=gap,
+                current_speed=speed,
+                historical_data=profile_history,
+                market=market_name,
+                segment=segment_name,
+                timeframe=selected_timeframe,
+                current_timestamp=current_timestamp,
+                required_speed=live.get("required_speed"),
+            )
+            if not isinstance(result, dict):
+                raise TypeError("AdaptiveLeadTimeCalculator returned a non-dictionary")
+            result["available"] = True
+            return result
+        except Exception as exc:
+            neutral["error"] = f"Adaptive lead-time calculation failed: {exc}"
+            return neutral
+
     def _calculate_significance(self, force_score: float) -> Dict[str, Any]:
         """Reuse the repository SignificanceTester API safely.
 
@@ -810,6 +895,57 @@ class PredictionEngine:
             "error": None,
         }
 
+    def _calculate_monte_carlo(
+        self,
+        live_data: Dict[str, Any],
+        historical_data: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Run the existing Monte Carlo trade simulation through a safe adapter."""
+        neutral = {
+            "available": False,
+            "win_prob": 0.5,
+            "loss_prob": 0.5,
+            "expected_return": 0.0,
+            "error": "Monte Carlo unavailable: insufficient price data",
+        }
+        try:
+            live = live_data if isinstance(live_data, dict) else {}
+            entry = self._safe_float(live.get("close", live.get("ltp", 0.0)), 0.0)
+            if entry <= 0.0:
+                raise ValueError("missing positive entry price")
+            prices = [
+                self._safe_float(item.get("close", item.get("ltp", 0.0)), 0.0)
+                for item in historical_data
+                if isinstance(item, dict)
+            ]
+            prices = [price for price in prices if price > 0.0]
+            parameters = self.stochastic_model.estimate_gbm_parameters(prices) if len(prices) >= 2 else {}
+            mu = self._safe_float(parameters.get("mu"), 0.0)
+            sigma = max(0.0, self._safe_float(parameters.get("sigma"), 0.0))
+            raw = self.monte_carlo_engine.simulate_trade(
+                entry,
+                entry * 0.99,
+                entry * 1.01,
+                mu,
+                sigma,
+                n_simulations=1000,
+            )
+            if not isinstance(raw, dict):
+                raise TypeError("Monte Carlo engine returned a non-dictionary")
+            win_prob = self._safe_float(raw.get("win_probability"), 0.5)
+            loss_prob = self._safe_float(raw.get("loss_probability"), 0.5)
+            return {
+                "available": True,
+                "win_prob": max(0.0, min(1.0, win_prob)),
+                "loss_prob": max(0.0, min(1.0, loss_prob)),
+                "expected_return": self._safe_float(raw.get("expected_pnl_per_share"), 0.0),
+                "raw": raw,
+                "error": None,
+            }
+        except Exception as exc:
+            neutral["error"] = f"Monte Carlo calculation failed: {exc}"
+            return neutral
+
     def _detect_regime(self, historical_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Reuse the project’s repository regime detector safely.
 
@@ -965,6 +1101,9 @@ class PredictionEngine:
         historical_data: List[Dict[str, Any]],
         order_flow_data: Any = None,
         options_data: Optional[Dict[str, Any]] = None,
+        market: Optional[str] = None,
+        segment: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the modular prediction pipeline and return structured diagnostics."""
         live = live_data if isinstance(live_data, dict) else {}
@@ -972,6 +1111,7 @@ class PredictionEngine:
         force = self._calculate_force(live, history, options_data)
         order_flow = self._calculate_order_flow(order_flow_data)
         lead_time = self._calculate_lead_time(force["score"], history)
+        adaptive_lead_time = self._calculate_adaptive_lead_time(live, history, market, segment, timeframe)
         significance = self._calculate_significance(force["score"])
         regime = self._detect_regime(history)
         ml_result = self._calculate_ml(force["factors"], lead_time, regime)
@@ -1005,6 +1145,7 @@ class PredictionEngine:
             "force": force,
             "order_flow": order_flow,
             "lead_time": lead_time,
+            "adaptive_lead_time": adaptive_lead_time,
             "significance": significance,
             "ml": ml_result,
             "monte_carlo": monte_carlo,

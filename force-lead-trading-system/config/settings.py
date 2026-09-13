@@ -1,11 +1,13 @@
 """Centralized, import-safe application configuration."""
 
 import os
+import re
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 
 def _env_int(name, default):
@@ -84,6 +86,7 @@ class Settings:
         self.ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID", "")
         self.ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD", "")
         self.ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET", "")
+        self.TRADING_MODE = os.getenv("TRADING_MODE", "paper").strip().lower() or "paper"
         self.STOCK_SYMBOL = os.getenv("STOCK_SYMBOL", "NIFTY")
         self.TIMEFRAME_MINUTES = _env_int("TIMEFRAME", 5)
         self.CAPITAL = _env_float("CAPITAL", 10000.0)
@@ -92,6 +95,7 @@ class Settings:
         self.angel_client_id = self.ANGEL_CLIENT_ID
         self.angel_password = self.ANGEL_PASSWORD
         self.angel_totp_secret = self.ANGEL_TOTP_SECRET
+        self.trading_mode = self.TRADING_MODE
         self.stock_symbol = self.STOCK_SYMBOL
         self.timeframe = self.TIMEFRAME_MINUTES
         self.capital = self.CAPITAL
@@ -108,7 +112,58 @@ class Settings:
         self.MAX_DAILY_LOSS_PCT = 0.05  # Maximum allowed daily portfolio loss percentage.
         self.MAX_TRADES_PER_DAY = 5  # Maximum number of trades allowed per day.
 
+    @property
+    def angel_api_missing_fields(self):
+        """Return missing credential field names without exposing secret values."""
+        return [
+            name
+            for name, value in (
+                ("ANGEL_API_KEY", self.ANGEL_API_KEY),
+                ("ANGEL_CLIENT_ID", self.ANGEL_CLIENT_ID),
+                ("ANGEL_PASSWORD", self.ANGEL_PASSWORD),
+                ("ANGEL_TOTP_SECRET", self.ANGEL_TOTP_SECRET),
+            )
+            if not str(value or "").strip()
+        ]
+
+    @property
+    def angel_api_configured(self):
+        """True only when every Angel One credential is present."""
+        return not self.angel_api_missing_fields
+
+    @property
+    def angel_api_status(self):
+        """Safe status suitable for diagnostics; never includes credential values."""
+        missing = self.angel_api_missing_fields
+        return {
+            "configured": not missing,
+            "missing_fields": missing,
+            "message": "Angel One API configured."
+            if not missing
+            else f"Angel One API credentials missing: {', '.join(missing)}.",
+            "trading_mode": self.TRADING_MODE,
+            "paper_mode": self.TRADING_MODE == "paper",
+        }
+
+    def angel_api_config_message(self):
+        """Return a concise setup message without exposing secrets."""
+        return self.angel_api_status["message"]
+
     def validate(self):
+        if self.TRADING_MODE not in {"paper", "live", "backtest", "test"}:
+            raise ValueError("TRADING_MODE must be one of: paper, live, backtest, test")
+
+        credential_patterns = {
+            "ANGEL_API_KEY": r"[A-Za-z0-9]{8,128}",
+            "ANGEL_CLIENT_ID": r"[A-Za-z0-9]{8,32}",
+            "ANGEL_PASSWORD": r"\S+",
+            "ANGEL_TOTP_SECRET": r"[A-Z2-7]{16,64}",
+        }
+        for name, pattern in credential_patterns.items():
+            value = getattr(self, name)
+            if not re.fullmatch(pattern, str(value or "").strip()):
+                raise ValueError(f"{name} is missing or has an invalid format")
+
         if self.CAPITAL <= 0:
             raise ValueError("CAPITAL must be greater than 0")
         if self.TIMEFRAME_MINUTES <= 0:

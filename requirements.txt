@@ -2,6 +2,11 @@
 pandas
 numpy
 scikit-learn
+scipy
+statsmodels
+xgboost
+flask
+flask-socketio
 
 # Optional: for plotting and analysis
 matplotlib

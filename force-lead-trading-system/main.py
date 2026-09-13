@@ -84,7 +84,7 @@ def main():
     from startup import initialize_system
     from main_loop import run_main_loop
     from utils.trade_logger import TradeLogger
-    from dashboard.prediction_server import broadcast_prediction, start_dashboard
+    from dashboard.app import push_update as broadcast_prediction, start_dashboard
 
     if args.mode == "live":
         print("WARNING: LIVE TRADING MODE is selected.")
